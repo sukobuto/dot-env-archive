@@ -19,16 +19,34 @@ impl Archive {
                 path TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 body TEXT NOT NULL,
+                checksum TEXT NOT NULL,
                 PRIMARY KEY (path, created_at)
             );
             CREATE INDEX IF NOT EXISTS archives_path_idx ON archives (path);
             CREATE INDEX IF NOT EXISTS archives_created_at_idx ON archives (created_at);
-            
         "#;
         let conn = Connection::open(&self.database_path)?;
         conn.execute_batch(query)?;
 
         Ok(())
+    }
+
+    /// env_file_path の内容が、最新のアーカイブと同じかどうかをチェックする
+    pub async fn check_is_same_body(&self, env_file_path: &Path) -> anyhow::Result<bool> {
+        let checksum = crate::digest::file_checksum(env_file_path).await?;
+        let conn = Connection::open(&self.database_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT checksum FROM archives WHERE path = ?1 ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let rows = stmt.query_map([env_file_path.to_string_lossy()], |row| {
+            row.get::<_, String>(0)
+        })?;
+
+        if let Some(row) = rows.into_iter().next() {
+            let row = row?;
+            return Ok(row == checksum);
+        }
+        Ok(false)
     }
 
     /// env_file_path の内容を、パスと時刻と共にアーカイブに登録する
@@ -39,18 +57,20 @@ impl Archive {
         name: &str,
     ) -> anyhow::Result<()> {
         let body = tokio::fs::read_to_string(env_file_path).await?;
+        let checksum = crate::digest::file_checksum(env_file_path).await?;
 
         let conn = Connection::open(&self.database_path)?;
         conn.execute(
             r#"
-            INSERT INTO archives (name, path, created_at, body)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO archives (name, path, created_at, body, checksum)
+            VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
             params![
                 name,
                 env_file_path.to_string_lossy(),
                 now.to_rfc3339(),
-                body
+                body,
+                checksum,
             ],
         )?;
 
@@ -59,57 +79,63 @@ impl Archive {
 
     pub async fn list_all(&self) -> anyhow::Result<Vec<ArchiveEntry>> {
         let conn = Connection::open(&self.database_path)?;
-        let mut stmt = conn.prepare("SELECT name, path, created_at FROM archives")?;
+        let mut stmt = conn.prepare("SELECT name, path, created_at, checksum FROM archives")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
 
         let mut archives = Vec::new();
         for row in rows {
-            let (name, path, created_at) = row?;
+            let (name, path, created_at, checksum) = row?;
             archives.push(ArchiveEntry {
                 name,
                 path,
                 created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                checksum,
             });
         }
 
         Ok(archives)
     }
 
+    #[allow(dead_code)]
     pub async fn list_in_path(&self, path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
         let conn = Connection::open(&self.database_path)?;
-        let mut stmt =
-            conn.prepare("SELECT name, path, created_at FROM archives WHERE path LIKE ?1")?;
+        let mut stmt = conn
+            .prepare("SELECT name, path, created_at, checksum FROM archives WHERE path LIKE ?1")?;
         let rows = stmt.query_map([format!("{}%", path.to_string_lossy())], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
 
         let mut archives = Vec::new();
         for row in rows {
-            let (name, path, created_at) = row?;
+            let (name, path, created_at, checksum) = row?;
             archives.push(ArchiveEntry {
                 name,
                 path,
                 created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                checksum,
             });
         }
 
         Ok(archives)
     }
 
+    #[allow(dead_code)]
     pub async fn find_by_path(&self, path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
         let conn = Connection::open(&self.database_path)?;
         let mut stmt = conn.prepare(
-            "SELECT name, path, created_at, body FROM archives WHERE path = ?1 ORDER BY created_at DESC",
+            "SELECT name, path, created_at, body, checksum FROM archives WHERE path = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([path.to_string_lossy()], |row| {
             Ok((
@@ -127,6 +153,7 @@ impl Archive {
                 name: row.0,
                 path: row.1,
                 created_at: DateTime::parse_from_rfc3339(&row.2)?.with_timezone(&Utc),
+                checksum: row.3,
             });
         }
         Ok(archives)
@@ -136,7 +163,7 @@ impl Archive {
     pub async fn get(&self, name: &str) -> anyhow::Result<Option<(ArchiveEntry, String)>> {
         let conn = Connection::open(&self.database_path)?;
         let mut stmt = conn.prepare(
-            "SELECT name, path, created_at, body FROM archives WHERE name = ?1 ORDER BY created_at DESC",
+            "SELECT name, path, created_at, body, checksum FROM archives WHERE name = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([name], |row| {
             Ok((
@@ -144,6 +171,7 @@ impl Archive {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
 
@@ -155,6 +183,7 @@ impl Archive {
                     name: row.0,
                     path: row.1,
                     created_at: DateTime::parse_from_rfc3339(&row.2)?.with_timezone(&Utc),
+                    checksum: row.4,
                 },
                 row.3,
             ));
@@ -166,13 +195,14 @@ impl Archive {
     pub async fn search(&self, keyword: &str) -> anyhow::Result<Vec<ArchiveEntry>> {
         let conn = Connection::open(&self.database_path)?;
         let mut stmt = conn.prepare(
-            "SELECT name, path, created_at FROM archives WHERE path LIKE ?1 ORDER BY path, created_at DESC",
+            "SELECT name, path, created_at, checksum FROM archives WHERE path LIKE ?1 ORDER BY path, created_at DESC",
         )?;
         let rows = stmt.query_map([format!("%{}%", keyword)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
 
@@ -183,6 +213,7 @@ impl Archive {
                 name: row.0,
                 path: row.1,
                 created_at: DateTime::parse_from_rfc3339(&row.2)?.with_timezone(&Utc),
+                checksum: row.3,
             });
         }
         Ok(archives)
@@ -194,6 +225,7 @@ pub struct ArchiveEntry {
     pub name: String,
     pub path: String,
     pub created_at: DateTime<Utc>,
+    pub checksum: String,
 }
 
 #[cfg(test)]
@@ -282,12 +314,17 @@ mod tests {
                 name,
                 path,
                 created_at,
+                checksum,
             },
         ) in archives.iter().enumerate()
         {
             assert_eq!(name, &i.to_string());
             assert_eq!(path, &env_files[i].0.to_string_lossy());
             assert_eq!(created_at, &now);
+            assert_eq!(
+                checksum,
+                &crate::digest::file_checksum(&env_files[i].0).await.unwrap()
+            );
         }
     }
 
@@ -324,12 +361,17 @@ mod tests {
                 name,
                 path,
                 created_at,
+                checksum,
             },
         ) in archives.iter().enumerate()
         {
             assert_eq!(name, &i.to_string());
             assert_eq!(path, &env_files[i].0.to_string_lossy());
             assert_eq!(created_at, &now);
+            assert_eq!(
+                checksum,
+                &crate::digest::file_checksum(&env_files[i].0).await.unwrap()
+            );
         }
 
         let archives = archive

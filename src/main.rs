@@ -4,6 +4,8 @@
 // タグ付けされた .env ファイルは一意に識別できるため、同じファイルを複数回アーカイブしても問題ありません。
 
 mod archive;
+mod digest;
+mod helper;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -77,7 +79,7 @@ struct Context {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let database: PathBuf = args.database.map(|d| PathBuf::from(d)).unwrap_or_else(|| {
+    let database: PathBuf = args.database.map(PathBuf::from).unwrap_or_else(|| {
         dirs::home_dir()
             .expect("Failed to get home directory")
             .join(".env_archive")
@@ -165,24 +167,28 @@ async fn show(context: &Context, name: String) {
 }
 
 async fn crawl(context: &Context, dir: &Path, dry_run: bool) {
-    let files = globmatch::Builder::new("**/{.env,.env.*}")
-        .build(dir)
-        .expect("Failed to build globmatch")
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let files = helper::search_env_files(dir).expect("Failed to search env files");
 
     let archive = archive::Archive::new(context.database.to_path_buf());
     for file in files {
-        println!("{}", file.display());
-        if dry_run {
+        let name = ulid::Ulid::new().to_string();
+        if archive
+            .check_is_same_body(&file)
+            .await
+            .expect("Failed to check body")
+        {
+            println!("[SKIP] {}", file.display());
             continue;
         }
-        let name = ulid::Ulid::new().to_string();
+        if dry_run {
+            println!("[PUSH DRY RUN] {}", file.display());
+            continue;
+        }
         archive
             .push(&file, context.now, &name)
             .await
             .expect("Failed to push archive");
+        println!("[PUSHED] {}", file.display());
     }
 }
 
