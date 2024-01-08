@@ -25,7 +25,7 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum SubCommands {
-    /// アーカイブに登録する .env ファイルを探す
+    /// ディレクトリを再帰的に巡回して .env, .env.* ファイルを探し、アーカイブに登録する
     #[clap(arg_required_else_help = false)]
     Crawl {
         /// アーカイブに登録する .env ファイルを探すディレクトリ
@@ -165,23 +165,19 @@ async fn show(context: &Context, name: String) {
 }
 
 async fn crawl(context: &Context, dir: &Path, dry_run: bool) {
-    // todo dir を再帰的に巡回して .env ファイルを探し、アーカイブに登録する
-    let files = globmatch::Builder::new("**/.env")
+    let files = globmatch::Builder::new("**/{.env,.env.*}")
         .build(dir)
         .expect("Failed to build globmatch")
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
 
-    if dry_run {
-        for file in files {
-            println!("{}", file.display());
-        }
-        return;
-    }
-
     let archive = archive::Archive::new(context.database.to_path_buf());
     for file in files {
+        println!("{}", file.display());
+        if dry_run {
+            continue;
+        }
         let name = ulid::Ulid::new().to_string();
         archive
             .push(&file, context.now, &name)
