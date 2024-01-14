@@ -266,6 +266,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_is_same_as_latest_最新のアーカイブと同じならtrueを異なるならfalseを返す() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let database_path = tmp_dir.path().join("test.db");
+        let archive = Archive::new(database_path.clone());
+        archive.initialize().await.unwrap();
+
+        let env_file_path = tmp_dir.path().join(".env");
+        create_dot_env_file(&[(env_file_path.clone(), "FOO=BAR")]).await;
+
+        let now = Utc::now();
+        archive
+            .push(&env_file_path, now, "test-name")
+            .await
+            .unwrap();
+
+        let is_same = archive
+            .check_is_same_as_latest(&env_file_path)
+            .await
+            .unwrap();
+        assert!(is_same);
+
+        let env_file_path = tmp_dir.path().join("test_a").join(".env");
+        create_dot_env_file(&[(env_file_path.clone(), "FOO=BAR")]).await;
+
+        let is_same = archive
+            .check_is_same_as_latest(&env_file_path)
+            .await
+            .unwrap();
+        assert!(!is_same);
+    }
+
+    #[tokio::test]
+    async fn check_is_same_by_name_nameに一致するアーカイブと同じならtrueを異なるならfalseを返す() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let database_path = tmp_dir.path().join("test.db");
+        let archive = Archive::new(database_path.clone());
+        archive.initialize().await.unwrap();
+
+        let env_file_path = tmp_dir.path().join(".env");
+        create_dot_env_file(&[(env_file_path.clone(), "FOO=BAR")]).await;
+
+        let now = Utc::now();
+        archive
+            .push(&env_file_path, now, "test-name")
+            .await
+            .unwrap();
+
+        let is_same = archive
+            .check_is_same_by_name("test-name", &env_file_path)
+            .await
+            .unwrap();
+        assert!(is_same);
+
+        let env_file_path = tmp_dir.path().join("test_a").join(".env");
+        create_dot_env_file(&[(env_file_path.clone(), "FOO=BAA")]).await;
+
+        let is_same = archive
+            .check_is_same_by_name("test-name", &env_file_path)
+            .await
+            .unwrap();
+        assert!(!is_same);
+    }
+
+    #[tokio::test]
     async fn pushするとdbに保存される() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let database_path = tmp_dir.path().join("test.db");
