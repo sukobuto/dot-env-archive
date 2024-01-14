@@ -32,7 +32,7 @@ impl Archive {
     }
 
     /// env_file_path の内容が、最新のアーカイブと同じかどうかをチェックする
-    pub async fn check_is_same_body(&self, env_file_path: &Path) -> anyhow::Result<bool> {
+    pub async fn check_is_same_as_latest(&self, env_file_path: &Path) -> anyhow::Result<bool> {
         let checksum = crate::digest::file_checksum(env_file_path).await?;
         let conn = Connection::open(&self.database_path)?;
         let mut stmt = conn.prepare(
@@ -41,6 +41,26 @@ impl Archive {
         let rows = stmt.query_map([env_file_path.to_string_lossy()], |row| {
             row.get::<_, String>(0)
         })?;
+
+        if let Some(row) = rows.into_iter().next() {
+            let row = row?;
+            return Ok(row == checksum);
+        }
+        Ok(false)
+    }
+
+    /// env_file_path の内容が、name で指定したアーカイブと同じかどうかをチェックする
+    pub async fn check_is_same_by_name(
+        &self,
+        name: &str,
+        env_file_path: &Path,
+    ) -> anyhow::Result<bool> {
+        let checksum = crate::digest::file_checksum(env_file_path).await?;
+        let conn = Connection::open(&self.database_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT checksum FROM archives WHERE name = ?1 ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let rows = stmt.query_map([name], |row| row.get::<_, String>(0))?;
 
         if let Some(row) = rows.into_iter().next() {
             let row = row?;

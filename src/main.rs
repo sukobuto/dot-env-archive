@@ -21,21 +21,14 @@ use std::path::{Path, PathBuf};
 struct Args {
     #[clap(subcommand)]
     subcommand: SubCommands,
+    /// アーカイブデータベースファイルのパス
+    /// デフォルトは $HOME/.env_archive です
     #[clap(short, long, env = "ENV_ARCHIVE_DATABASE")]
     database: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 enum SubCommands {
-    /// ディレクトリを再帰的に巡回して .env, .env.* ファイルを探し、アーカイブに登録する
-    #[clap(arg_required_else_help = false)]
-    Crawl {
-        /// アーカイブに登録する .env ファイルを探すディレクトリ
-        #[clap(short, long, default_value = ".")]
-        dir: String,
-        #[clap(long = "dry-run")]
-        dry_run: bool,
-    },
     /// アーカイブを初期化する
     #[clap(arg_required_else_help = false)]
     Init {
@@ -52,6 +45,21 @@ enum SubCommands {
         #[clap(short, long)]
         name: Option<String>,
     },
+    /// ディレクトリを再帰的に巡回して .env, .env.* ファイルを探し、アーカイブに登録する
+    #[clap(arg_required_else_help = false)]
+    Crawl {
+        /// アーカイブに登録する .env ファイルを探すディレクトリ
+        #[clap(short, long, default_value = ".")]
+        dir: String,
+        #[clap(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// アーカイブに登録されている .env ファイルをパス名の部分一致で検索する
+    Search {
+        /// アーカイブに登録されている .env ファイルパスの一部
+        #[clap(required = true)]
+        keyword: String,
+    },
     /// アーカイブに登録されている .env ファイルの一覧を表示する
     ListAll,
     /// アーカイブに登録されている .env ファイルを表示する
@@ -60,11 +68,11 @@ enum SubCommands {
         #[clap(required = true)]
         name: String,
     },
-    /// アーカイブに登録されている .env ファイルをパス名の部分一致で検索する
-    Search {
-        /// アーカイブに登録されている .env ファイルパスの一部
+    /// アーカイブに登録されている .env ファイルを復元する
+    Recover {
+        /// アーカイブに登録されている .env ファイルの名前
         #[clap(required = true)]
-        keyword: String,
+        name: String,
     },
 }
 
@@ -106,10 +114,13 @@ async fn main() -> anyhow::Result<()> {
             list_all(&context).await;
         }
         SubCommands::Show { name } => {
-            show(&context, name).await;
+            show(&context, &name).await;
         }
         SubCommands::Search { keyword } => {
             search(&context, keyword).await;
+        }
+        SubCommands::Recover { name } => {
+            recover(&context, &name).await;
         }
     }
 
@@ -156,14 +167,58 @@ async fn list_all(context: &Context) {
     }
 }
 
-async fn show(context: &Context, name: String) {
+async fn show(context: &Context, name: &str) {
     let archive = archive::Archive::new(context.database.to_path_buf());
     let (_, body) = archive
-        .get(&name)
+        .get(name)
         .await
         .expect("Failed to show archive")
         .expect("Archive not found");
     println!("{}", body);
+}
+
+async fn recover(context: &Context, name: &str) {
+    let archive = archive::Archive::new(context.database.to_path_buf());
+    let (entry, body) = archive
+        .get(name)
+        .await
+        .expect("Failed to show archive")
+        .expect("Archive not found");
+    let target_filename = Path::new(&entry.path)
+        .file_name()
+        .expect("Failed to get file name")
+        .to_string_lossy()
+        .to_string();
+    let target_path = Path::new(&target_filename);
+    println!(
+        "archive_path: {}\ntarget_path: {:?}",
+        entry.path, target_path
+    );
+
+    if target_path.exists() {
+        if archive
+            .check_is_same_by_name(name, target_path)
+            .await
+            .expect("Failed to check body")
+        {
+            println!("[SKIP] same checksum. {}", target_path.display());
+            return;
+        }
+        let ulid = ulid::Ulid::new();
+        let backup_name = format!("backup.{}", ulid.to_string());
+        archive
+            .push(target_path, context.now, &backup_name)
+            .await
+            .expect("Failed to push archive for backup");
+        println!(
+            "[BACKUP] {} with name {}",
+            target_path.display(),
+            backup_name
+        );
+    }
+
+    std::fs::write(target_path, body).expect("Failed to write file");
+    println!("[RECOVERED] {} from {}", target_path.display(), name);
 }
 
 async fn crawl(context: &Context, dir: &Path, dry_run: bool) {
@@ -173,7 +228,7 @@ async fn crawl(context: &Context, dir: &Path, dry_run: bool) {
     for file in files {
         let name = ulid::Ulid::new().to_string();
         if archive
-            .check_is_same_body(&file)
+            .check_is_same_as_latest(&file)
             .await
             .expect("Failed to check body")
         {
