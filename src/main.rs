@@ -60,6 +60,11 @@ enum SubCommands {
         #[clap(required = true)]
         keyword: String,
     },
+    /// カレントディレクトリ、または指定したパス配下に一致するアーカイブの一覧を表示する
+    List {
+        #[clap(short, long, default_value = ".")]
+        dir: String,
+    },
     /// アーカイブに登録されている .env ファイルの一覧を表示する
     ListAll,
     /// アーカイブに登録されている .env ファイルを表示する
@@ -110,6 +115,9 @@ async fn main() -> anyhow::Result<()> {
         SubCommands::Push { file, name } => {
             push(&context, &std::fs::canonicalize(Path::new(&file))?, name).await;
         }
+        SubCommands::List { dir } => {
+            list(&context, &std::fs::canonicalize(Path::new(&dir))?).await;
+        }
         SubCommands::ListAll => {
             list_all(&context).await;
         }
@@ -155,8 +163,28 @@ async fn push(context: &Context, env_file_path: &Path, name: Option<String>) {
 }
 
 async fn list_all(context: &Context) {
+    // think 現状はすべてのタイムスタンプを出力しているが、最新のアーカイブのみを表示するコマンドとして
+    // 過去のアーカイブを列挙するコマンドを別に切り出したほうが使いやすくなる
     let archive = archive::Archive::new(context.database.to_path_buf());
     let archives = archive.list_all().await.expect("Failed to list archive");
+    for archive in archives {
+        println!(
+            "{} {:?} {}",
+            archive.name,
+            archive.path,
+            archive.created_at.with_timezone(&context.timezone)
+        );
+    }
+}
+
+async fn list(context: &Context, path: &Path) {
+    // think 現状はすべてのタイムスタンプを出力しているが、最新のアーカイブのみを表示するコマンドとして
+    // 過去のアーカイブを列挙するコマンドを別に切り出したほうが使いやすくなる
+    let archive = archive::Archive::new(context.database.to_path_buf());
+    let archives = archive
+        .list_in_path(path)
+        .await
+        .expect("Failed to list archive");
     for archive in archives {
         println!(
             "{} {:?} {}",
