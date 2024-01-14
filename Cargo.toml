@@ -2,6 +2,9 @@
 name = "dot-env-archive"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Kenta Suzuki <sukobuto@gmail.com>"]
+description = "A tool to archive .env files scattered in directories for each project to a single location and restore them from the archive."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
